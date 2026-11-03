@@ -1,0 +1,31 @@
+[package]
+name = "basicproject_rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+# gomachine README 의 Rust 의존성 블록 (생성 코드가 쓴다)
+axum = "0.8.9"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "net", "signal"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "mysql", "mysql-rsa", "derive", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
+bcrypt = "0.19.3"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.6", features = ["cors"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+strip = true
