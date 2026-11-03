@@ -34,18 +34,24 @@ pub fn connect_options(url: &str) -> Result<MySqlConnectOptions, sqlx::Error> {
 
 /// connect_options 로 풀을 만들고 연결해 본다.
 pub async fn connect(url: &str, max_connections: u32) -> Result<MySqlPool, sqlx::Error> {
-    MySqlPoolOptions::new().max_connections(max_connections).connect_with(connect_options(url)?).await
+    MySqlPoolOptions::new()
+        .max_connections(max_connections)
+        .connect_with(connect_options(url)?)
+        .await
 }
 
 /// connect_options 로 풀을 만든다 (처음 쓸 때 연결한다).
 pub fn connect_lazy(url: &str, max_connections: u32) -> Result<MySqlPool, sqlx::Error> {
-    Ok(MySqlPoolOptions::new().max_connections(max_connections).connect_lazy_with(connect_options(url)?))
+    Ok(MySqlPoolOptions::new()
+        .max_connections(max_connections)
+        .connect_lazy_with(connect_options(url)?))
 }
 
 // URL 쿼리에 timezone / time-zone 파라미터가 있는지
 fn url_has_timezone(url: &str) -> bool {
     url.split_once('?').is_some_and(|(_, q)| {
-        q.split('&').any(|kv| matches!(kv.split('=').next(), Some("timezone" | "time-zone")))
+        q.split('&')
+            .any(|kv| matches!(kv.split('=').next(), Some("timezone" | "time-zone")))
     })
 }
 

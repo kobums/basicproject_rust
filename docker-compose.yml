@@ -43,6 +43,10 @@ services:
       PORT: "8008"
     ports:
       - "${PORT:-8008}:8008"
+    volumes:
+      # 업로드 파일 (/uploads 로 서빙)
+      - upload-data:/app/webdata
 
 volumes:
   db-data:
+  upload-data:

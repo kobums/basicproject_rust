@@ -10,14 +10,14 @@ use axum::extract::{FromRef, State};
 use axum::routing::{delete, get, patch, post, put};
 use sqlx::MySqlPool;
 
-use crate::models::user::{User};
+use crate::models::user::User;
 use crate::support::params::{self, BodyArg, IdArg, PathArg, QueryArg, QueryParams};
 use crate::support::password;
-use crate::support::query::{Arg, Bind, Custom, Where};
+use crate::support::query::{Arg, Bind, Custom, Where, like_filter};
 use crate::support::response::{ApiResult, CODE_BAD_REQUEST, Reply, bad_request};
 use crate::support::session::{Session, is_admin};
 
-/// 보호 컬럼을 바꿀 수 있는 관리자 level (model.json adminLevel)
+/// 관리자 level (model.json adminLevel): 보호 컬럼 변경, User 전체 읽기
 const ADMIN_LEVEL: i64 = 3;
 
 /// user_tb 경로. routes.rs 가 합친다.
@@ -43,11 +43,11 @@ pub fn parse_filters(q: &QueryParams) -> Result<Vec<Arg>, &'static str> {
     let mut args: Vec<Arg> = Vec::new();
     let v = q.get("email");
     if !v.is_empty() {
-        args.push(Where::new("email", v, "like").into());
+        args.push(like_filter("u_email", v, false));
     }
     let v = q.get("name");
     if !v.is_empty() {
-        args.push(Where::new("name", v, "=").into());
+        args.push(like_filter("u_name", v, false));
     }
     let v = q.get("level");
     if !v.is_empty() {
@@ -75,7 +75,10 @@ async fn index(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
         return Ok(bad_request());
     };
     // page 는 params::MAX_PAGE 까지 (넘으면 400, Go 와 같다).
-    let (Some(page), Some(pagesize)) = (params::parse_page(q.get("page")).filter(|p| *p <= params::MAX_PAGE), params::parse_page(q.get("pagesize"))) else {
+    let (Some(page), Some(pagesize)) = (
+        params::parse_page(q.get("page")).filter(|p| *p <= params::MAX_PAGE),
+        params::parse_page(q.get("pagesize")),
+    ) else {
         return Ok(bad_request());
     };
     let Ok(mut args) = parse_filters(&q) else {
@@ -83,9 +86,13 @@ async fn index(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
     };
     // page 0 은 전체 행, pagesize 는 10000 을 넘지 않는다 (Go / Spring 과 같다).
     let pagesize = pagesize.min(10000);
-    let Some(_) = session else {
+    let Some(s) = session else {
         return Ok(ApiResult::auth_error().into());
     };
+    // 회원 정보는 본인 행만 읽는다 (관리자 제외).
+    if !is_admin(Some(&s), Some(ADMIN_LEVEL)) {
+        args.push(Where::eq("id", s.id).into());
+    }
     // 개수는 페이지 / 정렬 없이 같은 조건으로 센다.
     let count_args = args.clone();
     let paged = page != 0 && pagesize != 0;
@@ -110,9 +117,13 @@ async fn read(State(pool): State<MySqlPool>, session: Option<Session>, id: IdArg
     let Some(id) = params::path_id::<i64>(id) else {
         return Ok(bad_request());
     };
-    let Some(_) = session else {
+    let Some(s) = session else {
         return Ok(ApiResult::auth_error().into());
     };
+    // 회원 정보는 본인 행만 읽는다 (관리자 제외).
+    if !is_admin(Some(&s), Some(ADMIN_LEVEL)) && id != s.id {
+        return Ok(ApiResult::auth_error().into());
+    }
     let item = User::get(&pool, id).await?;
     Ok(ApiResult::ok().set("item", &item).into())
 }
@@ -128,7 +139,7 @@ async fn insert(State(pool): State<MySqlPool>, session: Option<Session>, body: B
     item.createddate = String::new();
     // 보호 컬럼은 클라이언트 값을 받지 않는다 (관리자 제외).
     if !is_admin(session.as_ref(), Some(ADMIN_LEVEL)) {
-        item.level = Default::default();
+        item.level = 1;
     }
     // 비밀번호는 해시해서 저장한다 (Go jwt.GeneratePasswd 와 같은 bcrypt).
     if !item.passwd.is_empty() {
@@ -141,7 +152,10 @@ async fn insert(State(pool): State<MySqlPool>, session: Option<Session>, body: B
 /// POST /user/batch: 여러 행 추가 (Go Insertbatch). 모든 행을 준비(해시 등)한 다음 저장한다 (트랜잭션은 아니다).
 async fn insert_batch(State(pool): State<MySqlPool>, session: Option<Session>, body: BodyArg) -> Reply {
     // 한 번에 params::MAX_BATCH 행까지 (넘으면 400, Go 와 같다).
-    let Some(mut items) = params::body_bytes(body).and_then(|b| User::list_from_body(&b)).filter(|v| v.len() <= params::MAX_BATCH) else {
+    let Some(mut items) = params::body_bytes(body)
+        .and_then(|b| User::list_from_body(&b))
+        .filter(|v| v.len() <= params::MAX_BATCH)
+    else {
         return Ok(bad_request());
     };
     if items.is_empty() {
@@ -158,7 +172,7 @@ async fn insert_batch(State(pool): State<MySqlPool>, session: Option<Session>, b
         item.createddate = String::new();
         // 보호 컬럼은 클라이언트 값을 받지 않는다 (관리자 제외).
         if !admin {
-            item.level = Default::default();
+            item.level = 1;
         }
         // 비밀번호는 해시해서 저장한다 (Go jwt.GeneratePasswd 와 같은 bcrypt).
         if !item.passwd.is_empty() {
@@ -176,22 +190,30 @@ async fn count(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
     let Some(q) = params::query_params(query) else {
         return Ok(bad_request());
     };
-    let Ok(args) = parse_filters(&q) else {
+    let Ok(mut args) = parse_filters(&q) else {
         return Ok(bad_request());
     };
-    let Some(_) = session else {
+    let Some(s) = session else {
         return Ok(ApiResult::auth_error().into());
     };
+    // 회원 정보는 본인 행만 읽는다 (관리자 제외).
+    if !is_admin(Some(&s), Some(ADMIN_LEVEL)) {
+        args.push(Where::eq("id", s.id).into());
+    }
     let total = User::count(&pool, &args).await?;
     Ok(ApiResult::ok().set("total", total).set("count", total).into())
 }
 
 /// GET /user/search/{field}?{key}=값 (Go Search): 컬럼이 값과 같은 행 목록. 세션이 있으면 본인 소유 행만.
 async fn search(pool: MySqlPool, session: Option<Session>, column: &'static str, value: Bind) -> Reply {
-    let Some(_) = session else {
+    let Some(s) = session else {
         return Ok(ApiResult::auth_error().into());
     };
-    let args: Vec<Arg> = vec![Where::new(column, value, "=").into()];
+    let mut args: Vec<Arg> = vec![Where::new(column, value, "=").into()];
+    // 회원 정보는 본인 행만 읽는다 (관리자 제외).
+    if !is_admin(Some(&s), Some(ADMIN_LEVEL)) {
+        args.push(Where::eq("id", s.id).into());
+    }
     let items = User::find(&pool, &args).await?;
     Ok(ApiResult::ok().set("items", &items).into())
 }
@@ -325,7 +347,10 @@ async fn delete_one(pool: MySqlPool, session: Option<Session>, id: i64) -> Reply
 /// 남의 행이 하나라도 있으면 아무것도 지우지 않는다. 삭제는 트랜잭션이 아니다.
 async fn delete_batch(State(pool): State<MySqlPool>, session: Option<Session>, body: BodyArg) -> Reply {
     // 한 번에 params::MAX_BATCH 행까지 (넘으면 400, Go 와 같다).
-    let Some(items) = params::body_bytes(body).and_then(|b| User::list_from_body(&b)).filter(|v| v.len() <= params::MAX_BATCH) else {
+    let Some(items) = params::body_bytes(body)
+        .and_then(|b| User::list_from_body(&b))
+        .filter(|v| v.len() <= params::MAX_BATCH)
+    else {
         return Ok(bad_request());
     };
     let Some(s) = session else {
@@ -342,4 +367,3 @@ async fn delete_batch(State(pool): State<MySqlPool>, session: Option<Session>, b
     }
     Ok(ApiResult::ok().into())
 }
-

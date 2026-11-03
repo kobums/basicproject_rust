@@ -21,11 +21,12 @@ pub const WHERE_PREFIX: &str = "b_";
 /// 기본 정렬 컬럼 (페이지면 desc)
 pub const ORDER_COLUMN: &str = "b_id";
 /// 목록 / 단건 select (조인은 left join)
-pub const SELECT: &str = "select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb";
+pub const SELECT: &str = "select board_tb.b_id, board_tb.b_title, board_tb.b_content, board_tb.b_img, board_tb.b_user, DATE_FORMAT(board_tb.b_createddate, '%Y-%m-%d %H:%i:%s'), user_tb.u_id, user_tb.u_email, user_tb.u_passwd, user_tb.u_name, user_tb.u_level, DATE_FORMAT(user_tb.u_createddate, '%Y-%m-%d %H:%i:%s') from board_tb left join user_tb on board_tb.b_user = user_tb.u_id";
 /// 개수 select (목록과 같은 from)
-pub const COUNT: &str = "select count(*) from board_tb";
+pub const COUNT: &str = "select count(*) from board_tb left join user_tb on board_tb.b_user = user_tb.u_id";
 /// 조인 없이 이 테이블만 읽는 select (GetRaw)
-pub const RAW_SELECT: &str = "select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb";
+pub const RAW_SELECT: &str =
+    "select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb";
 
 /// 요청 본문 key (JSON key, Go 와 같이 대소문자는 가리지 않는다)
 const KEYS: &[&str] = &["id", "title", "content", "img", "user", "createddate"];
@@ -71,12 +72,13 @@ impl Board {
 
     /// 조인까지 읽는다 (Get / Find). 조인 행이 없으면 extra 의 그 key 는 null 이다.
     fn read_joined(r: &MySqlRow) -> Result<Self, sqlx::Error> {
-        Self::read_row(r)
+        let mut item = Self::read_row(r)?;
+        item.extra.insert("user".into(), join_user(r)?);
+        Ok(item)
     }
 
     /// enum 표시 이름을 extra 에 넣는다 (Go InitExtra).
-    pub fn init_extra(&mut self) {
-    }
+    pub fn init_extra(&mut self) {}
 
     /// 정렬 이름(API 이름 / 접두사 뺀 이름 / 전체 이름, 대소문자 무시)의 SQL 컬럼 (Go OrderColumn).
     pub fn order_column(name: &str) -> Option<&'static str> {
@@ -177,7 +179,10 @@ impl Board {
     }
 
     pub fn get_query(id: i64) -> QueryBuilder<MySql> {
-        query::bound("select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb where 1=1 and b_id = ?", &[Bind::from(id)])
+        query::bound(
+            "select board_tb.b_id, board_tb.b_title, board_tb.b_content, board_tb.b_img, board_tb.b_user, DATE_FORMAT(board_tb.b_createddate, '%Y-%m-%d %H:%i:%s'), user_tb.u_id, user_tb.u_email, user_tb.u_passwd, user_tb.u_name, user_tb.u_level, DATE_FORMAT(user_tb.u_createddate, '%Y-%m-%d %H:%i:%s') from board_tb left join user_tb on board_tb.b_user = user_tb.u_id where 1=1 and b_id = ?",
+            &[Bind::from(id)],
+        )
     }
 
     /// 조인을 포함한 한 행 (Go Get).
@@ -189,7 +194,10 @@ impl Board {
     }
 
     pub fn get_raw_query(id: i64) -> QueryBuilder<MySql> {
-        query::bound("select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb where b_id = ?", &[Bind::from(id)])
+        query::bound(
+            "select b_id, b_title, b_content, b_img, b_user, DATE_FORMAT(b_createddate, '%Y-%m-%d %H:%i:%s') from board_tb where b_id = ?",
+            &[Bind::from(id)],
+        )
     }
 
     /// 조인 없이 이 테이블의 행 (Go GetRaw: 수정 / 삭제 / 소유권 검사용). NULL 은 None 으로 남는다.
@@ -213,7 +221,10 @@ impl Board {
         let mut qb = Self::find_query(args);
         log_query(&qb);
         let rows = qb.build().fetch_all(pool).await?;
-        rows.iter().map(Self::read_joined).collect::<Result<Vec<_>, _>>().map_err(Error::from)
+        rows.iter()
+            .map(Self::read_joined)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::from)
     }
 
     pub fn count_query(args: &[Arg]) -> QueryBuilder<MySql> {
@@ -245,9 +256,28 @@ impl Board {
         }
         item.fill_dates();
         if item.id > 0 {
-            return query::bound("insert into board_tb (b_id, b_title, b_content, b_img, b_user, b_createddate) values (?, ?, ?, ?, ?, ?)", &[Bind::from(item.id), Bind::from(item.title.clone()), Bind::from(item.content.clone()), Bind::from(item.img.clone()), Bind::from(item.user), Bind::from(item.createddate.clone())]);
+            return query::bound(
+                "insert into board_tb (b_id, b_title, b_content, b_img, b_user, b_createddate) values (?, ?, ?, ?, ?, ?)",
+                &[
+                    Bind::from(item.id),
+                    Bind::from(item.title.clone()),
+                    Bind::from(item.content.clone()),
+                    Bind::from(item.img.clone()),
+                    Bind::from(item.user),
+                    Bind::from(item.createddate.clone()),
+                ],
+            );
         }
-        query::bound("insert into board_tb (b_title, b_content, b_img, b_user, b_createddate) values (?, ?, ?, ?, ?)", &[Bind::from(item.title.clone()), Bind::from(item.content.clone()), Bind::from(item.img.clone()), Bind::from(item.user), Bind::from(item.createddate.clone())])
+        query::bound(
+            "insert into board_tb (b_title, b_content, b_img, b_user, b_createddate) values (?, ?, ?, ?, ?)",
+            &[
+                Bind::from(item.title.clone()),
+                Bind::from(item.content.clone()),
+                Bind::from(item.img.clone()),
+                Bind::from(item.user),
+                Bind::from(item.createddate.clone()),
+            ],
+        )
     }
 
     /// 저장하고 자동 증가 id (LAST_INSERT_ID) 를 돌려준다.
@@ -261,7 +291,17 @@ impl Board {
     /// Update SQL (Go UpdateNulls): id 를 뺀 모든 컬럼을 저장한다. None 은 NULL.
     pub fn update_query(item: &mut Self) -> QueryBuilder<MySql> {
         item.fill_dates();
-        query::bound("update board_tb set b_title = ?, b_content = ?, b_img = ?, b_user = ?, b_createddate = ? where b_id = ?", &[Bind::from(item.title.clone()), Bind::from(item.content.clone()), Bind::from(item.img.clone()), Bind::from(item.user), Bind::from(item.createddate.clone()), Bind::from(item.id)])
+        query::bound(
+            "update board_tb set b_title = ?, b_content = ?, b_img = ?, b_user = ?, b_createddate = ? where b_id = ?",
+            &[
+                Bind::from(item.title.clone()),
+                Bind::from(item.content.clone()),
+                Bind::from(item.img.clone()),
+                Bind::from(item.user),
+                Bind::from(item.createddate.clone()),
+                Bind::from(item.id),
+            ],
+        )
     }
 
     pub async fn update(pool: &MySqlPool, item: &mut Self) -> Result<(), Error> {
@@ -283,3 +323,23 @@ impl Board {
     }
 }
 
+/// 조인 user (left join): 조인 행이 없으면 null. NOT NULL 컬럼의 NULL 은 0 값 (Go 와 같다).
+fn join_user(r: &MySqlRow) -> Result<Value, sqlx::Error> {
+    let v0 = r.try_get::<Option<i64>, _>(6)?;
+    let v1 = r.try_get::<Option<String>, _>(7)?;
+    let v3 = r.try_get::<Option<String>, _>(9)?;
+    let v4 = r.try_get::<Option<i32>, _>(10)?;
+    let v5 = row::date_opt(r.try_get::<Option<String>, _>(11)?);
+    if v0.is_none() {
+        return Ok(Value::Null);
+    }
+    let mut m = Map::new();
+    m.insert("id".into(), json!(v0.unwrap_or_default()));
+    m.insert("email".into(), json!(v1.unwrap_or_default()));
+    m.insert("name".into(), json!(v3.unwrap_or_default()));
+    m.insert("level".into(), json!(v4.unwrap_or_default()));
+    m.insert("createddate".into(), json!(v5.unwrap_or_default()));
+    let extra = Map::new();
+    m.insert("extra".into(), Value::Object(extra));
+    Ok(Value::Object(m))
+}

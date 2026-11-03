@@ -25,7 +25,8 @@ pub const SELECT: &str = "select u_id, u_email, u_passwd, u_name, u_level, DATE_
 /// 개수 select (목록과 같은 from)
 pub const COUNT: &str = "select count(*) from user_tb";
 /// 조인 없이 이 테이블만 읽는 select (GetRaw)
-pub const RAW_SELECT: &str = "select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb";
+pub const RAW_SELECT: &str =
+    "select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb";
 
 /// 요청 본문 key (JSON key, Go 와 같이 대소문자는 가리지 않는다)
 const KEYS: &[&str] = &["id", "email", "passwd", "name", "level", "createddate"];
@@ -75,8 +76,7 @@ impl User {
     }
 
     /// enum 표시 이름을 extra 에 넣는다 (Go InitExtra).
-    pub fn init_extra(&mut self) {
-    }
+    pub fn init_extra(&mut self) {}
 
     /// 정렬 이름(API 이름 / 접두사 뺀 이름 / 전체 이름, 대소문자 무시)의 SQL 컬럼 (Go OrderColumn).
     pub fn order_column(name: &str) -> Option<&'static str> {
@@ -176,7 +176,10 @@ impl User {
     }
 
     pub fn get_query(id: i64) -> QueryBuilder<MySql> {
-        query::bound("select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb where 1=1 and u_id = ?", &[Bind::from(id)])
+        query::bound(
+            "select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb where 1=1 and u_id = ?",
+            &[Bind::from(id)],
+        )
     }
 
     /// 조인을 포함한 한 행 (Go Get).
@@ -188,7 +191,10 @@ impl User {
     }
 
     pub fn get_raw_query(id: i64) -> QueryBuilder<MySql> {
-        query::bound("select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb where u_id = ?", &[Bind::from(id)])
+        query::bound(
+            "select u_id, u_email, u_passwd, u_name, u_level, DATE_FORMAT(u_createddate, '%Y-%m-%d %H:%i:%s') from user_tb where u_id = ?",
+            &[Bind::from(id)],
+        )
     }
 
     /// 조인 없이 이 테이블의 행 (Go GetRaw: 수정 / 삭제 / 소유권 검사용). NULL 은 None 으로 남는다.
@@ -212,7 +218,10 @@ impl User {
         let mut qb = Self::find_query(args);
         log_query(&qb);
         let rows = qb.build().fetch_all(pool).await?;
-        rows.iter().map(Self::read_joined).collect::<Result<Vec<_>, _>>().map_err(Error::from)
+        rows.iter()
+            .map(Self::read_joined)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::from)
     }
 
     pub fn count_query(args: &[Arg]) -> QueryBuilder<MySql> {
@@ -244,9 +253,28 @@ impl User {
         }
         item.fill_dates();
         if item.id > 0 {
-            return query::bound("insert into user_tb (u_id, u_email, u_passwd, u_name, u_level, u_createddate) values (?, ?, ?, ?, ?, ?)", &[Bind::from(item.id), Bind::from(item.email.clone()), Bind::from(item.passwd.clone()), Bind::from(item.name.clone()), Bind::from(item.level), Bind::from(item.createddate.clone())]);
+            return query::bound(
+                "insert into user_tb (u_id, u_email, u_passwd, u_name, u_level, u_createddate) values (?, ?, ?, ?, ?, ?)",
+                &[
+                    Bind::from(item.id),
+                    Bind::from(item.email.clone()),
+                    Bind::from(item.passwd.clone()),
+                    Bind::from(item.name.clone()),
+                    Bind::from(item.level),
+                    Bind::from(item.createddate.clone()),
+                ],
+            );
         }
-        query::bound("insert into user_tb (u_email, u_passwd, u_name, u_level, u_createddate) values (?, ?, ?, ?, ?)", &[Bind::from(item.email.clone()), Bind::from(item.passwd.clone()), Bind::from(item.name.clone()), Bind::from(item.level), Bind::from(item.createddate.clone())])
+        query::bound(
+            "insert into user_tb (u_email, u_passwd, u_name, u_level, u_createddate) values (?, ?, ?, ?, ?)",
+            &[
+                Bind::from(item.email.clone()),
+                Bind::from(item.passwd.clone()),
+                Bind::from(item.name.clone()),
+                Bind::from(item.level),
+                Bind::from(item.createddate.clone()),
+            ],
+        )
     }
 
     /// 저장하고 자동 증가 id (LAST_INSERT_ID) 를 돌려준다.
@@ -260,7 +288,17 @@ impl User {
     /// Update SQL (Go UpdateNulls): id 를 뺀 모든 컬럼을 저장한다. None 은 NULL.
     pub fn update_query(item: &mut Self) -> QueryBuilder<MySql> {
         item.fill_dates();
-        query::bound("update user_tb set u_email = ?, u_passwd = ?, u_name = ?, u_level = ?, u_createddate = ? where u_id = ?", &[Bind::from(item.email.clone()), Bind::from(item.passwd.clone()), Bind::from(item.name.clone()), Bind::from(item.level), Bind::from(item.createddate.clone()), Bind::from(item.id)])
+        query::bound(
+            "update user_tb set u_email = ?, u_passwd = ?, u_name = ?, u_level = ?, u_createddate = ? where u_id = ?",
+            &[
+                Bind::from(item.email.clone()),
+                Bind::from(item.passwd.clone()),
+                Bind::from(item.name.clone()),
+                Bind::from(item.level),
+                Bind::from(item.createddate.clone()),
+                Bind::from(item.id),
+            ],
+        )
     }
 
     pub async fn update(pool: &MySqlPool, item: &mut Self) -> Result<(), Error> {
@@ -281,4 +319,3 @@ impl User {
         Ok(())
     }
 }
-

@@ -4,7 +4,13 @@
 // tinyint / (bit<>0) 은 sqlx 의 bool 로 바로 읽는다 (0 이 아니면 true, Go 와 같다).
 
 /// 읽을 때 "" 로 바꾸는 자리표시 날짜 (Go 와 같다).
-pub const DATE_SENTINELS: [&str; 5] = ["0000-00-00 00:00:00", "1000-01-01 00:00:00", "9999-01-01 00:00:00", "0000-00-00", "1000-01-01"];
+pub const DATE_SENTINELS: [&str; 5] = [
+    "0000-00-00 00:00:00",
+    "1000-01-01 00:00:00",
+    "9999-01-01 00:00:00",
+    "0000-00-00",
+    "1000-01-01",
+];
 
 /// 자리표시 날짜인지.
 pub fn is_sentinel_date(s: &str) -> bool {
@@ -58,7 +64,10 @@ mod tests {
     #[test]
     fn labels() {
         let labels = ["", "Use", "Stop"];
-        assert_eq!((label(&labels, 1), label(&labels, 0), label(&labels, 3), label(&labels, -1)), ("Use", "", "", ""));
+        assert_eq!(
+            (label(&labels, 1), label(&labels, 0), label(&labels, 3), label(&labels, -1)),
+            ("Use", "", "", "")
+        );
     }
 
     #[test]

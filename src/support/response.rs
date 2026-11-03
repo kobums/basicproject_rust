@@ -118,10 +118,16 @@ mod tests {
     #[test]
     fn result_shape() {
         let r = ApiResult::ok().set("items", vec![1, 2]).set("total", 2);
-        assert_eq!(Value::Object(r.clone().into_map()), json!({"code": "ok", "items": [1, 2], "total": 2}));
+        assert_eq!(
+            Value::Object(r.clone().into_map()),
+            json!({"code": "ok", "items": [1, 2], "total": 2})
+        );
         assert!(r.is_ok());
         let none: Option<i32> = None;
-        assert_eq!(Value::Object(ApiResult::ok().set("item", none).into_map()), json!({"code": "ok", "item": null}));
+        assert_eq!(
+            Value::Object(ApiResult::ok().set("item", none).into_map()),
+            json!({"code": "ok", "item": null})
+        );
         assert_eq!(ApiResult::auth_error().get_code(), "auth error");
         assert_eq!(ApiResult::ok().code(CODE_ERROR).get_code(), "error");
         assert_eq!(ApiResult::error().into_response().status(), StatusCode::OK);

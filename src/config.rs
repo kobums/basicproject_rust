@@ -9,8 +9,8 @@ pub const DEFAULT_PORT: u16 = 8008;
 /// 개발 기본 CORS 허용 출처 (basicproject_go DefaultCorsOrigins 와 같다).
 pub const DEFAULT_CORS_ORIGINS: &str = "http://localhost:5173,http://localhost:3000,http://localhost:9007";
 
-/// JWT 비밀 키 최소 길이 (HS256, 바이트). basicproject_go 와 같다.
-pub const MIN_JWT_SECRET_LEN: usize = 32;
+/// JWT 비밀 키 최소 길이 (HS256, 바이트). basicproject_go / support::auth::MIN_SECRET_LEN 과 같다.
+pub const MIN_JWT_SECRET_LEN: usize = crate::support::auth::MIN_SECRET_LEN;
 
 /// APP_MODE=production 인지 (그 밖은 develop).
 pub fn is_production(mode: Option<&str>) -> bool {

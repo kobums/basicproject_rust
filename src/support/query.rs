@@ -153,7 +153,11 @@ pub struct Where {
 
 impl Where {
     pub fn new(column: impl Into<Cow<'static, str>>, value: impl Into<Bind>, compare: impl Into<Cow<'static, str>>) -> Self {
-        Where { column: column.into(), value: value.into(), compare: compare.into() }
+        Where {
+            column: column.into(),
+            value: value.into(),
+            compare: compare.into(),
+        }
     }
 
     /// 같은 값 (=) 조건.
@@ -175,13 +179,44 @@ impl Custom {
     }
 }
 
+/// 목록 필터 부분 일치의 escape 문자 (모든 백엔드가 같다: `like ? escape '!'`).
+/// 백슬래시가 아니라서 sql_mode(NO_BACKSLASH_ESCAPES)와 상관없다.
+pub const LIKE_ESCAPE: char = '!';
+
+/// 부분 일치 패턴: %, _, ! 를 ! 로 escape 하고 양쪽에 % 를 붙인다 ("50%" → "%50!%%").
+pub fn like_pattern(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('%');
+    for c in v.chars() {
+        if matches!(c, '%' | '_' | LIKE_ESCAPE) {
+            out.push(LIKE_ESCAPE);
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+/// 목록 필터의 부분 일치 조건 `{column} like ? escape '!'` (not 이면 not like). column 은 SQL 컬럼 이름
+/// (접두사 포함, 생성 코드의 상수)이고 형식이 어긋나면 조건 " and 1=0" 이다.
+pub fn like_filter(column: &'static str, value: &str, not: bool) -> Arg {
+    if !valid_column(column) {
+        return Custom::new("1=0", Vec::new()).into();
+    }
+    let op = if not { "not like" } else { "like" };
+    Custom::new(format!("{column} {op} ? escape '{LIKE_ESCAPE}'"), vec![like_pattern(value).into()]).into()
+}
+
 /// 조회 인자 (Go 의 []interface{} args).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     Where(Where),
     Custom(Custom),
     /// page 는 1 부터. page / pagesize 가 0 이면 전체 행.
-    Paging { page: i64, pagesize: i64 },
+    Paging {
+        page: i64,
+        pagesize: i64,
+    },
     /// 정렬 절. SQL 에 그대로 들어가므로 검증한 값(모델 parse_order / 코드 상수)만 넘긴다.
     Ordering(String),
 }
@@ -405,6 +440,31 @@ mod tests {
     }
 
     #[test]
+    fn like_filters() {
+        assert_eq!(like_pattern("abc"), "%abc%");
+        assert_eq!(like_pattern("50%_!x"), "%50!%!_!!x%");
+        assert_eq!(like_pattern("a\\b"), "%a\\b%");
+        let sql = |a: Arg| {
+            build(|qb| {
+                apply_args(qb, "u_", &[a]);
+            })
+        };
+        assert_eq!(
+            sql(like_filter("u_name", "a%", false)),
+            ("select * from t where 1=1 and u_name like ? escape '!'".into(), 1)
+        );
+        assert_eq!(
+            sql(like_filter("t.u_name", "a", true)),
+            ("select * from t where 1=1 and t.u_name not like ? escape '!'".into(), 1)
+        );
+        assert_eq!(sql(like_filter("u name", "a", false)).0, "select * from t where 1=1 and 1=0");
+        match like_filter("u_name", "a_b", false) {
+            Arg::Custom(c) => assert_eq!(c.params, vec![Bind::Str("%a!_b%".into())]),
+            a => panic!("{a:?}"),
+        }
+    }
+
+    #[test]
     fn scalar_operators() {
         for op in ["=", "!=", "<>", "<", "<=", ">", ">=", "like", "not like"] {
             assert_eq!(where_sql("name", "a%".into(), op), (format!(" and u_name {op} ?"), 1), "{op}");
@@ -416,8 +476,14 @@ mod tests {
 
     #[test]
     fn in_operators() {
-        assert_eq!(where_sql("id", Bind::list([1i64, 2, 3]), "in"), (" and u_id in (?, ?, ?)".into(), 3));
-        assert_eq!(where_sql("id", Bind::list([1i64, 2]), "not in"), (" and u_id not in (?, ?)".into(), 2));
+        assert_eq!(
+            where_sql("id", Bind::list([1i64, 2, 3]), "in"),
+            (" and u_id in (?, ?, ?)".into(), 3)
+        );
+        assert_eq!(
+            where_sql("id", Bind::list([1i64, 2]), "not in"),
+            (" and u_id not in (?, ?)".into(), 2)
+        );
         assert_eq!(where_sql("id", 7i64.into(), "in"), (" and u_id in (?)".into(), 1));
         assert_eq!(where_sql("id", Bind::List(vec![]), "in"), (" and 1=0".into(), 0));
         assert_eq!(where_sql("id", Bind::List(vec![]), "not in"), (" and 1=1".into(), 0));
@@ -428,7 +494,10 @@ mod tests {
     fn between() {
         let range = Bind::pair("2024-01-01", "2024-02-01");
         assert_eq!(where_sql("date", range, "between"), (" and u_date between ? and ?".into(), 2));
-        assert_eq!(where_sql("date", Bind::list(["a", "b"]), "between"), (" and u_date between ? and ?".into(), 2));
+        assert_eq!(
+            where_sql("date", Bind::list(["a", "b"]), "between"),
+            (" and u_date between ? and ?".into(), 2)
+        );
         assert_eq!(where_sql("date", Bind::list(["a"]), "between"), (" and 1=0".into(), 0));
         assert_eq!(where_sql("date", "a".into(), "between"), (" and 1=0".into(), 0));
     }
@@ -446,9 +515,15 @@ mod tests {
 
     #[test]
     fn custom() {
-        let c = Custom::new("(u_owner <> ? or u_owner is null) and u_name <> '?' and u_x = ?", vec![3i64.into(), "a".into()]);
+        let c = Custom::new(
+            "(u_owner <> ? or u_owner is null) and u_name <> '?' and u_x = ?",
+            vec![3i64.into(), "a".into()],
+        );
         let (sql, n) = build(|qb| push_custom(qb, &c));
-        assert_eq!(sql, "select * from t where 1=1 and (u_owner <> ? or u_owner is null) and u_name <> '?' and u_x = ?");
+        assert_eq!(
+            sql,
+            "select * from t where 1=1 and (u_owner <> ? or u_owner is null) and u_name <> '?' and u_x = ?"
+        );
         assert_eq!(n, 2);
         let bad = Custom::new("u_a = ? and u_b = ?", vec![1.into()]);
         assert_eq!(build(|qb| push_custom(qb, &bad)), ("select * from t where 1=1 and 1=0".into(), 0));
@@ -478,25 +553,69 @@ mod tests {
             assert_eq!(page.limit_offset(), Some((20, 40)));
             push_order_page(qb, &page, "u_id");
         });
-        assert_eq!(sql, "select * from t where 1=1 and u_status = ? and u_level >= ? order by u_name asc limit ? offset ?");
+        assert_eq!(
+            sql,
+            "select * from t where 1=1 and u_status = ? and u_level >= ? order by u_name asc limit ? offset ?"
+        );
         assert_eq!(n, 4);
 
-        let (sql, n) = build(|qb| push_order_page(qb, &Page { page: 1, pagesize: 10, order: None }, "u_id"));
-        assert_eq!((sql.as_str(), n), ("select * from t where 1=1 order by u_id desc limit ? offset ?", 2));
+        let (sql, n) = build(|qb| {
+            push_order_page(
+                qb,
+                &Page {
+                    page: 1,
+                    pagesize: 10,
+                    order: None,
+                },
+                "u_id",
+            )
+        });
+        assert_eq!(
+            (sql.as_str(), n),
+            ("select * from t where 1=1 order by u_id desc limit ? offset ?", 2)
+        );
         let (sql, n) = build(|qb| push_order_page(qb, &Page::default(), "u_id"));
         assert_eq!((sql.as_str(), n), ("select * from t where 1=1 order by u_id", 0));
-        let (sql, _) = build(|qb| push_order_page(qb, &Page { page: 0, pagesize: 10, order: Some("u_name".into()) }, "u_id"));
+        let (sql, _) = build(|qb| {
+            push_order_page(
+                qb,
+                &Page {
+                    page: 0,
+                    pagesize: 10,
+                    order: Some("u_name".into()),
+                },
+                "u_id",
+            )
+        });
         assert_eq!(sql, "select * from t where 1=1 order by u_name");
     }
 
     #[test]
     fn paging_overflow_saturates() {
         // 아주 큰 page 도 panic 없이 빈 페이지 (offset i64::MAX)
-        let page = Page { page: i64::MAX, pagesize: 10000, order: None };
+        let page = Page {
+            page: i64::MAX,
+            pagesize: 10000,
+            order: None,
+        };
         assert_eq!(page.limit_offset(), Some((10000, i64::MAX)));
-        let page = Page { page: i64::MAX, pagesize: 1, order: None };
+        let page = Page {
+            page: i64::MAX,
+            pagesize: 1,
+            order: None,
+        };
         assert_eq!(page.limit_offset(), Some((1, i64::MAX - 1)));
-        let (_, n) = build(|qb| push_order_page(qb, &Page { page: i64::MAX, pagesize: 20, order: None }, "u_id"));
+        let (_, n) = build(|qb| {
+            push_order_page(
+                qb,
+                &Page {
+                    page: i64::MAX,
+                    pagesize: 20,
+                    order: None,
+                },
+                "u_id",
+            )
+        });
         assert_eq!(n, 2);
     }
 }

@@ -1,6 +1,7 @@
-// DB 없이 돌리는 앱 테스트: 통일 JWT, 라우터 구성, 인증 API 입력 검증.
+// DB 없이 돌리는 앱 테스트: 통일 JWT, 라우터 구성, 읽기 정책, 인증 API 입력 검증 / 응답 모양, 업로드.
 // 풀은 connect_lazy (연결하지 않음) 라서 DB 를 읽기 전에 끝나는 경로만 확인한다.
 
+use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,8 +14,8 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::auth_api;
 use crate::support::{Session, auth, state};
+use crate::{auth_api, upload};
 
 const TEST_SECRET: &str = "test-secret-for-basicproject-rust-32b";
 
@@ -31,9 +32,14 @@ fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+// 테스트 업로드 디렉터리 (프로세스마다 하나, 저장 테스트가 지운다).
+fn upload_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("basicproject_rust_upload_{}", std::process::id()))
+}
+
 fn app() -> Router {
     let pool = state::connect_lazy("mysql://u:p@127.0.0.1:1/db", 1).unwrap();
-    crate::app(pool, &crate::config::Cors::Off)
+    crate::app(pool, &crate::config::Cors::Off, upload_dir())
 }
 
 async fn session_for(token: &str) -> Option<Session> {
@@ -132,9 +138,22 @@ async fn generated_routes_are_mounted() {
     // 생성 경로: id 를 해석하지 못하면 400 {"code":"bad request"} (Go 생성 라우터와 같다)
     let (status, body) = call(Request::get("/api/user/abc").body(Body::empty()).unwrap()).await;
     assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({"code": "bad request"})));
-    // board 는 session 설정이 있어서 비로그인 목록은 HTTP 200 auth error (DB 를 읽지 않는다)
-    let (status, body) = call(Request::get("/api/board").body(Body::empty()).unwrap()).await;
-    assert_eq!((status, body), (StatusCode::OK, json!({"code": "auth error"})));
+}
+
+#[tokio::test]
+async fn anonymous_reads_are_auth_errors() {
+    // board 는 read: "login", user 는 본인 / 관리자만 읽는다: 비로그인 읽기는 HTTP 200 auth error (DB 를 읽지 않는다)
+    for uri in [
+        "/api/board",
+        "/api/board/count",
+        "/api/board/1",
+        "/api/user",
+        "/api/user/count",
+        "/api/user/1",
+    ] {
+        let (status, body) = call(Request::get(uri).body(Body::empty()).unwrap()).await;
+        assert_eq!((status, body), (StatusCode::OK, json!({"code": "auth error"})), "{uri}");
+    }
 }
 
 fn assert_error(status: StatusCode, v: &Value, want_status: StatusCode, message: &str) {
@@ -186,7 +205,7 @@ async fn auth_input_validation() {
 async fn cors_preflight_allows_authorization_and_patch() {
     let pool = state::connect_lazy("mysql://u:p@127.0.0.1:1/db", 1).unwrap();
     let cors = crate::config::cors(None, false); // develop 기본 origin
-    let app = crate::app(pool, &cors);
+    let app = crate::app(pool, &cors, upload_dir());
     let req = Request::builder()
         .method("OPTIONS")
         .uri("/api/board/1")
@@ -219,11 +238,120 @@ async fn cors_preflight_allows_authorization_and_patch() {
 #[tokio::test]
 async fn cors_off_in_production_without_origins() {
     let pool = state::connect_lazy("mysql://u:p@127.0.0.1:1/db", 1).unwrap();
-    let app = crate::app(pool, &crate::config::cors(None, true));
+    let app = crate::app(pool, &crate::config::cors(None, true), upload_dir());
     let req = Request::get("/api/health")
         .header(header::ORIGIN, "http://evil.example")
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert!(res.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+}
+
+// ---- 업로드 ----
+
+const BOUNDARY: &str = "XbasicprojectBoundary";
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01";
+
+fn multipart_body(parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, filename, data) in parts {
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        match filename {
+            Some(f) => body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                )
+                .as_bytes(),
+            ),
+            None => body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes()),
+        }
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+fn upload_request(token: Option<&str>, body: Vec<u8>) -> Request<Body> {
+    let mut req = Request::post("/api/upload/index").header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={BOUNDARY}"));
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    req.body(Body::from(body)).unwrap()
+}
+
+fn login_token() -> String {
+    init_secret();
+    auth::make_token(1, "a@b.c", Some(1)).unwrap()
+}
+
+#[tokio::test]
+async fn upload_requires_login() {
+    let (status, v) = call(upload_request(None, multipart_body(&[("upload", Some("a.png"), PNG)]))).await;
+    assert_error(status, &v, StatusCode::UNAUTHORIZED, auth_api::MSG_AUTH_REQUIRED);
+    init_secret();
+    let (status, v) = call(upload_request(
+        Some("not-a-token"),
+        multipart_body(&[("upload", Some("a.png"), PNG)]),
+    ))
+    .await;
+    assert_error(status, &v, StatusCode::UNAUTHORIZED, auth_api::MSG_AUTH_REQUIRED);
+}
+
+#[tokio::test]
+async fn upload_validation() {
+    let token = login_token();
+    let cases: [(Vec<u8>, &str); 6] = [
+        (multipart_body(&[]), upload::MSG_NO_FILE),
+        (multipart_body(&[("other", Some("a.png"), PNG)]), upload::MSG_NO_FILE),
+        (multipart_body(&[("upload", None, b"text")]), upload::MSG_NO_FILE),
+        (
+            multipart_body(&[("upload", Some("a.html"), b"<script>alert(1)</script>")]),
+            upload::MSG_BAD_EXT,
+        ),
+        (
+            multipart_body(&[("upload", Some("a.png"), b"<svg onload=alert(1)>")]),
+            upload::MSG_NOT_IMAGE,
+        ),
+        (
+            multipart_body(&[("upload", Some("big.png"), &vec![0u8; upload::MAX_IMAGE_SIZE + 1])]),
+            upload::MSG_TOO_LARGE,
+        ),
+    ];
+    for (body, msg) in cases {
+        let (status, v) = call(upload_request(Some(&token), body)).await;
+        assert_error(status, &v, StatusCode::BAD_REQUEST, msg);
+    }
+    // multipart 가 아닌 본문
+    let req = Request::post("/api/upload/index")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let (status, v) = call(req).await;
+    assert_error(status, &v, StatusCode::BAD_REQUEST, upload::MSG_BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn upload_saves_and_serves() {
+    let token = login_token();
+    let (status, v) = call(upload_request(Some(&token), multipart_body(&[("upload", Some("photo.PNG"), PNG)]))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let filename = v["filename"].as_str().unwrap().to_string();
+    assert!(filename.ends_with(".png") && filename.len() == 36, "{filename}");
+    assert_eq!(v, json!({"filename": filename, "url": format!("/uploads/{filename}")}));
+    let res = app()
+        .oneshot(Request::get(format!("/uploads/{filename}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(&res.into_body().collect().await.unwrap().to_bytes()[..], PNG);
+    // 디렉터리 밖은 서빙하지 않는다
+    let res = app()
+        .oneshot(Request::get("/uploads/..%2F..%2Fetc%2Fpasswd").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_file(upload_dir().join(&filename));
 }

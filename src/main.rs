@@ -6,32 +6,34 @@
 //   JWT_SECRET         통일 JWT 서명 키 (32 바이트 이상, support/auth.rs), JWT_EXPIRATION_MS (기본 86400000)
 //   APP_MODE           develop | production
 //   CORS_ORIGINS       쉼표로 구분한 허용 origin (비우면 develop 은 localhost:5173,3000,9007, production 은 없음, "*" 는 모두)
+//   UPLOAD_PATH        업로드 루트 (기본 webdata, 파일은 {UPLOAD_PATH}/uploads, /uploads 로 서빙)
 //   RUST_LOG           기본 info (SQL 로그는 info,sql=debug)
 
-// gomachine 생성 모듈 (support/auth.rs 만 사용자 파일). 생성 코드는 rustfmt 형식이 아니고 다시 생성하면
-// 덮어쓰므로 cargo fmt 가 건드리지 않게 한다.
-#[rustfmt::skip]
+// gomachine 생성 모듈 (support/auth.rs 만 사용자 파일). gomachine 은 rustfmt 가 PATH 에 있으면 이 crate 의
+// rustfmt.toml 로 정리해서 쓰므로 cargo fmt --check 를 그대로 통과한다.
 mod handlers;
-#[rustfmt::skip]
 mod models;
-#[rustfmt::skip]
 mod routes;
-#[rustfmt::skip]
 mod support;
 
 // 직접 작성한 모듈
 mod auth_api;
 mod config;
+mod upload;
 
 #[cfg(test)]
 mod app_tests;
 
+use std::path::PathBuf;
+
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, Method, header};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use sqlx::MySqlPool;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 use config::Cors;
@@ -52,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = config::database_url(env)?;
     let port = config::port(env("PORT").as_deref())?;
     let cors = config::cors(env("CORS_ORIGINS").as_deref(), production);
+    let upload_dir = upload::upload_dir(env("UPLOAD_PATH").as_deref());
 
     // support::state::connect 는 세션 time_zone 을 바꾸지 않는다 (TIMESTAMP 를 Go 백엔드와 같은 서버 시간대로 읽는다).
     let pool = support::state::connect(&url, 20)
@@ -59,18 +62,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("cannot connect to the database (is it running? make db-up): {e}"))?;
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(production, ?cors, "listening on {}", listener.local_addr()?);
-    axum::serve(listener, app(pool, &cors)).with_graceful_shutdown(shutdown()).await?;
+    tracing::info!(production, ?cors, upload_dir = %upload_dir.display(), "listening on {}", listener.local_addr()?);
+    axum::serve(listener, app(pool, &cors, upload_dir))
+        .with_graceful_shutdown(shutdown())
+        .await?;
     Ok(())
 }
 
-/// 전체 라우터: /api 아래에 health + 인증 API + gomachine 생성 경로 (basicproject_go router.SetRouter 와 같은 순서).
-pub fn app(pool: MySqlPool, cors: &Cors) -> Router {
+/// 전체 라우터: /api 아래에 health + 인증 API + 업로드 + gomachine 생성 경로 (basicproject_go router.SetRouter 와 같은 순서),
+/// /uploads 는 upload_dir 정적 서빙. 요청 본문은 20MB 까지 (basicproject_go BodyLimit).
+pub fn app(pool: MySqlPool, cors: &Cors, upload_dir: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
         .merge(auth_api::routes())
-        .merge(routes::routes());
-    let router = Router::new().nest("/api", api).with_state(AppState::new(pool));
+        .merge(upload::routes(upload_dir.clone()))
+        .merge(routes::routes())
+        .layer(DefaultBodyLimit::max(upload::BODY_LIMIT));
+    let router = Router::new()
+        .nest("/api", api)
+        .nest_service(upload::URL_PREFIX, ServeDir::new(upload_dir))
+        .with_state(AppState::new(pool));
     match cors_layer(cors) {
         Some(layer) => router.layer(layer),
         None => router,

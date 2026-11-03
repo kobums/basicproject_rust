@@ -207,7 +207,16 @@ mod tests {
         }
         assert_eq!(parse_float("1.5"), Some(1.5));
         assert_eq!(parse_float("x"), None);
-        for (s, want) in [("1", Some(true)), ("T", Some(true)), ("True", Some(true)), ("f", Some(false)), ("FALSE", Some(false)), ("tRuE", None), ("yes", None), ("", None)] {
+        for (s, want) in [
+            ("1", Some(true)),
+            ("T", Some(true)),
+            ("True", Some(true)),
+            ("f", Some(false)),
+            ("FALSE", Some(false)),
+            ("tRuE", None),
+            ("yes", None),
+            ("", None),
+        ] {
             assert_eq!(parse_bool(s), want, "{s}");
         }
         assert_eq!(parse_page(""), Some(0));
@@ -241,7 +250,10 @@ mod tests {
         assert!(body_object(b"[1]").is_none());
         assert!(body_object(b"null").is_none());
         assert!(body_object(b"").is_none());
-        assert_eq!(body_value::<Vec<u8>>(&json!({"d": "ab"}).as_object().unwrap().clone(), "d"), Some(b"ab".to_vec()));
+        assert_eq!(
+            body_value::<Vec<u8>>(&json!({"d": "ab"}).as_object().unwrap().clone(), "d"),
+            Some(b"ab".to_vec())
+        );
     }
 
     #[test]

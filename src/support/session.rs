@@ -59,7 +59,10 @@ mod tests {
     fn values_and_admin() {
         let mut s = Session::new(7);
         s.values.insert("company".into(), 3);
-        assert_eq!((s.value("id"), s.value("Id"), s.value("company"), s.value("level"), s.value("x")), (7, 7, 3, 0, 0));
+        assert_eq!(
+            (s.value("id"), s.value("Id"), s.value("company"), s.value("level"), s.value("x")),
+            (7, 7, 3, 0, 0)
+        );
         assert!(!is_admin(Some(&s), Some(9)));
         s.level = Some(9);
         assert!(is_admin(Some(&s), Some(9)));

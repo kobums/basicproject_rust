@@ -16,7 +16,10 @@ FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 app
+    && useradd --system --uid 10001 app \
+    && mkdir -p /app/webdata/uploads && chown -R app /app/webdata
+# 업로드 파일은 /app/webdata/uploads (UPLOAD_PATH=webdata 기준, docker-compose 의 upload-data 볼륨)
+WORKDIR /app
 COPY --from=builder /app/target/release/basicproject_rust /usr/local/bin/basicproject_rust
 USER app
 ENV PORT=8008 RUST_LOG=info APP_MODE=production

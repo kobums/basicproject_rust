@@ -10,10 +10,10 @@ use axum::extract::{FromRef, State};
 use axum::routing::{delete, get, patch, post, put};
 use sqlx::MySqlPool;
 
-use crate::models::board::{Board};
+use crate::models::board::Board;
 use crate::support::params::{self, BodyArg, IdArg, PathArg, QueryArg, QueryParams};
 use crate::support::password;
-use crate::support::query::{Arg, Bind, Custom, Where};
+use crate::support::query::{Arg, Bind, Custom, Where, like_filter};
 use crate::support::response::{ApiResult, CODE_BAD_REQUEST, Reply, bad_request};
 use crate::support::session::{Session, is_admin};
 
@@ -41,15 +41,15 @@ pub fn parse_filters(q: &QueryParams) -> Result<Vec<Arg>, &'static str> {
     let mut args: Vec<Arg> = Vec::new();
     let v = q.get("title");
     if !v.is_empty() {
-        args.push(Where::new("title", v, "=").into());
+        args.push(like_filter("b_title", v, false));
     }
     let v = q.get("content");
     if !v.is_empty() {
-        args.push(Where::new("content", v, "=").into());
+        args.push(like_filter("b_content", v, false));
     }
     let v = q.get("img");
     if !v.is_empty() {
-        args.push(Where::new("img", v, "like").into());
+        args.push(like_filter("b_img", v, false));
     }
     let v = q.get("user");
     if !v.is_empty() {
@@ -77,7 +77,10 @@ async fn index(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
         return Ok(bad_request());
     };
     // page 는 params::MAX_PAGE 까지 (넘으면 400, Go 와 같다).
-    let (Some(page), Some(pagesize)) = (params::parse_page(q.get("page")).filter(|p| *p <= params::MAX_PAGE), params::parse_page(q.get("pagesize"))) else {
+    let (Some(page), Some(pagesize)) = (
+        params::parse_page(q.get("page")).filter(|p| *p <= params::MAX_PAGE),
+        params::parse_page(q.get("pagesize")),
+    ) else {
         return Ok(bad_request());
     };
     let Ok(mut args) = parse_filters(&q) else {
@@ -85,14 +88,9 @@ async fn index(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
     };
     // page 0 은 전체 행, pagesize 는 10000 을 넘지 않는다 (Go / Spring 과 같다).
     let pagesize = pagesize.min(10000);
-    let Some(s) = session else {
+    let Some(_) = session else {
         return Ok(ApiResult::auth_error().into());
     };
-    let sess_0 = s.value("id");
-    if sess_0 == 0 {
-        return Ok(ApiResult::auth_error().into());
-    }
-    args.push(Where::eq("user", sess_0).into());
     // 개수는 페이지 / 정렬 없이 같은 조건으로 센다.
     let count_args = args.clone();
     let paged = page != 0 && pagesize != 0;
@@ -112,25 +110,15 @@ async fn index(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
     Ok(result.into())
 }
 
-/// GET /board/{id}: 한 행 (Go Read). 없으면 item: null, 세션이 있으면 없는 행은 error, 남의 행은 auth error.
+/// GET /board/{id}: 한 행 (Go Read). 없으면 item: null.
 async fn read(State(pool): State<MySqlPool>, session: Option<Session>, id: IdArg) -> Reply {
     let Some(id) = params::path_id::<i64>(id) else {
         return Ok(bad_request());
     };
-    let Some(s) = session else {
+    let Some(_) = session else {
         return Ok(ApiResult::auth_error().into());
     };
-    let sess_0 = s.value("id");
-    if sess_0 == 0 {
-        return Ok(ApiResult::auth_error().into());
-    }
     let item = Board::get(&pool, id).await?;
-    let Some(item) = item else {
-        return Ok(ApiResult::error().into());
-    };
-    if item.user != sess_0 {
-        return Ok(ApiResult::auth_error().into());
-    }
     Ok(ApiResult::ok().set("item", &item).into())
 }
 
@@ -158,7 +146,10 @@ async fn insert(State(pool): State<MySqlPool>, session: Option<Session>, body: B
 /// POST /board/batch: 여러 행 추가 (Go Insertbatch). 모든 행을 준비(해시 등)한 다음 저장한다 (트랜잭션은 아니다).
 async fn insert_batch(State(pool): State<MySqlPool>, session: Option<Session>, body: BodyArg) -> Reply {
     // 한 번에 params::MAX_BATCH 행까지 (넘으면 400, Go 와 같다).
-    let Some(mut items) = params::body_bytes(body).and_then(|b| Board::list_from_body(&b)).filter(|v| v.len() <= params::MAX_BATCH) else {
+    let Some(mut items) = params::body_bytes(body)
+        .and_then(|b| Board::list_from_body(&b))
+        .filter(|v| v.len() <= params::MAX_BATCH)
+    else {
         return Ok(bad_request());
     };
     if items.is_empty() {
@@ -189,31 +180,22 @@ async fn count(State(pool): State<MySqlPool>, session: Option<Session>, query: Q
     let Some(q) = params::query_params(query) else {
         return Ok(bad_request());
     };
-    let Ok(mut args) = parse_filters(&q) else {
+    let Ok(args) = parse_filters(&q) else {
         return Ok(bad_request());
     };
-    let Some(s) = session else {
+    let Some(_) = session else {
         return Ok(ApiResult::auth_error().into());
     };
-    let sess_0 = s.value("id");
-    if sess_0 == 0 {
-        return Ok(ApiResult::auth_error().into());
-    }
-    args.push(Where::eq("user", sess_0).into());
     let total = Board::count(&pool, &args).await?;
     Ok(ApiResult::ok().set("total", total).set("count", total).into())
 }
 
 /// GET /board/search/{field}?{key}=값 (Go Search): 컬럼이 값과 같은 행 목록. 세션이 있으면 본인 소유 행만.
 async fn search(pool: MySqlPool, session: Option<Session>, column: &'static str, value: Bind) -> Reply {
-    let Some(s) = session else {
+    let Some(_) = session else {
         return Ok(ApiResult::auth_error().into());
     };
-    let sess_0 = s.value("id");
-    if sess_0 == 0 {
-        return Ok(ApiResult::auth_error().into());
-    }
-    let args: Vec<Arg> = vec![Where::new(column, value, "=").into(), Where::eq("user", sess_0).into()];
+    let args: Vec<Arg> = vec![Where::new(column, value, "=").into()];
     let items = Board::find(&pool, &args).await?;
     Ok(ApiResult::ok().set("items", &items).into())
 }
@@ -356,7 +338,10 @@ async fn delete_one(pool: MySqlPool, session: Option<Session>, id: i64) -> Reply
 /// 남의 행이 하나라도 있으면 아무것도 지우지 않는다. 삭제는 트랜잭션이 아니다.
 async fn delete_batch(State(pool): State<MySqlPool>, session: Option<Session>, body: BodyArg) -> Reply {
     // 한 번에 params::MAX_BATCH 행까지 (넘으면 400, Go 와 같다).
-    let Some(items) = params::body_bytes(body).and_then(|b| Board::list_from_body(&b)).filter(|v| v.len() <= params::MAX_BATCH) else {
+    let Some(items) = params::body_bytes(body)
+        .and_then(|b| Board::list_from_body(&b))
+        .filter(|v| v.len() <= params::MAX_BATCH)
+    else {
         return Ok(bad_request());
     };
     let Some(s) = session else {
@@ -376,4 +361,3 @@ async fn delete_batch(State(pool): State<MySqlPool>, session: Option<Session>, b
     }
     Ok(ApiResult::ok().into())
 }
-

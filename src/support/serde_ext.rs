@@ -35,7 +35,9 @@ impl<'de> Deserialize<'de> for LenientBool {
                 Ok(LenientBool(v != 0))
             }
             fn visit_str<E: de::Error>(self, v: &str) -> Result<LenientBool, E> {
-                parse_bool(v).map(LenientBool).ok_or_else(|| E::invalid_value(de::Unexpected::Str(v), &self))
+                parse_bool(v)
+                    .map(LenientBool)
+                    .ok_or_else(|| E::invalid_value(de::Unexpected::Str(v), &self))
             }
         }
         d.deserialize_any(V)
@@ -178,7 +180,17 @@ mod tests {
 
     #[test]
     fn lenient_bool() {
-        for (v, want) in [(json!(true), true), (json!(false), false), (json!(1), true), (json!(0), false), (json!(2), true), (json!("true"), true), (json!("FALSE"), false), (json!("1"), true), (json!("0"), false)] {
+        for (v, want) in [
+            (json!(true), true),
+            (json!(false), false),
+            (json!(1), true),
+            (json!(0), false),
+            (json!(2), true),
+            (json!("true"), true),
+            (json!("FALSE"), false),
+            (json!("1"), true),
+            (json!("0"), false),
+        ] {
             let item: Item = serde_json::from_value(json!({"flag": v})).unwrap();
             assert_eq!(item.flag, want, "{v}");
         }
@@ -196,7 +208,11 @@ mod tests {
 
     #[test]
     fn base64_round_trip() {
-        let item = Item { flag: true, maybe: None, data: vec![0, 1, 2, 250, 255] };
+        let item = Item {
+            flag: true,
+            maybe: None,
+            data: vec![0, 1, 2, 250, 255],
+        };
         let v = serde_json::to_value(&item).unwrap();
         // Go json.Marshal([]byte{0, 1, 2, 250, 255}) == "AAEC+v8="
         assert_eq!(v["data"], json!("AAEC+v8="));
@@ -211,8 +227,22 @@ mod tests {
         let p: Patch = serde_json::from_value(json!({})).unwrap();
         assert_eq!(p, Patch::default());
         let p: Patch = serde_json::from_value(json!({"name": null, "flag": null, "data": null})).unwrap();
-        assert_eq!(p, Patch { name: Some(None), flag: Some(None), data: Some(None) });
+        assert_eq!(
+            p,
+            Patch {
+                name: Some(None),
+                flag: Some(None),
+                data: Some(None)
+            }
+        );
         let p: Patch = serde_json::from_value(json!({"name": "a", "flag": 1, "data": "AQI="})).unwrap();
-        assert_eq!(p, Patch { name: Some(Some("a".into())), flag: Some(Some(true)), data: Some(Some(vec![1, 2])) });
+        assert_eq!(
+            p,
+            Patch {
+                name: Some(Some("a".into())),
+                flag: Some(Some(true)),
+                data: Some(Some(vec![1, 2]))
+            }
+        );
     }
 }

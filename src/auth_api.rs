@@ -1,15 +1,15 @@
-// 인증 API (직접 관리하는 파일, gomachine 은 만들지 않는다). basicproject_go router/routers/auth.go 와 같은 계약이다
-// (Spring AuthController 와 같은 JSON. 생성 CRUD 의 HTTP 200 + code 규칙과 달리 HTTP 상태 코드를 쓴다).
+// 인증 API (직접 관리하는 파일, gomachine 은 만들지 않는다). gomachine README "인증 API 계약" 그대로이고
+// basicproject_go router/routers/auth.go, Spring AuthController 와 같은 JSON 이다
+// (생성 CRUD 의 HTTP 200 + code 규칙과 달리 HTTP 상태 코드를 쓴다).
 //
-//   POST /api/auth/signup  {email, password, name?}  → 201 TokenResponse   (level 1, bcrypt 해시 저장)
-//   POST /api/auth/login   {email, password}         → 200 TokenResponse
-//   GET  /api/auth/me      (Authorization: Bearer)   → 200 UserResponse
+//   POST /api/auth/signup  {email, password, name?}  → 201 TokenResponse | 400 검증 | 409 이미 있는 email
+//   POST /api/auth/login   {email, password}         → 200 TokenResponse | 401 (빈 값 / 잘못된 본문은 400)
+//   GET  /api/auth/me      (Authorization: Bearer)   → 200 UserResponse  | 401 (토큰 없음 / 지워진 회원)
 //
 // TokenResponse = {token, tokenType: "Bearer", expiresInMs, user: UserResponse}
-// UserResponse  = {id, email, name, level, createdAt}            (비밀번호 없음)
-// 에러          = {status, message, fieldErrors: {..}, timestamp} (Spring ErrorResponse)
-//   400 본문 해석 실패 / 검증 실패 (fieldErrors), 401 로그인 실패 / 토큰 없음, 404 사용자 없음,
-//   409 이메일 중복, 500 해시 / 저장 / 토큰 발급 실패, 503 DB 접속 실패.
+// UserResponse  = {id, email, name, level, createddate}  (생성된 User 응답과 같은 JSON, 비밀번호 없음)
+// 에러          = {status, message, fieldErrors: {..}, timestamp} (fieldErrors 는 검증 실패일 때 채운다)
+//   500 해시 / 저장 / 토큰 발급 실패, 503 DB 접속 실패.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +42,6 @@ pub const MSG_NAME_TOO_LONG: &str = "이름은 100자 이하로 입력하세요.
 pub const MSG_INVALID_LOGIN: &str = "이메일 또는 비밀번호가 올바르지 않습니다.";
 pub const MSG_DUPLICATE_EMAIL: &str = "이미 사용 중인 이메일입니다.";
 pub const MSG_AUTH_REQUIRED: &str = "인증이 필요합니다.";
-pub const MSG_USER_NOT_FOUND: &str = "user not found";
 pub const MSG_DB_UNAVAILABLE: &str = "데이터베이스에 연결할 수 없습니다.";
 pub const MSG_SIGNUP_FAILED: &str = "회원가입에 실패했습니다.";
 pub const MSG_PASSWORD_FAILED: &str = "비밀번호 처리 중 오류가 발생했습니다.";
@@ -95,15 +94,15 @@ pub struct SignupRequest {
 
 // ---- 응답 ----
 
-/// 사용자 정보 (비밀번호 없음). basicproject_go dto.UserResponse.
+/// 사용자 정보 (비밀번호 없음). basicproject_go dto.UserResponse, 생성된 User 응답과 같은 key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UserResponse {
     pub id: i64,
     pub email: String,
     pub name: String,
     pub level: i32,
-    pub created_at: String,
+    /// yyyy-MM-dd HH:mm:ss
+    pub createddate: String,
 }
 
 impl From<&User> for UserResponse {
@@ -113,7 +112,7 @@ impl From<&User> for UserResponse {
             email: u.email.clone(),
             name: u.name.clone(),
             level: u.level,
-            created_at: u.createddate.clone(),
+            createddate: u.createddate.clone(),
         }
     }
 }
@@ -341,6 +340,10 @@ async fn signup(State(pool): State<MySqlPool>, body: BodyArg) -> Response {
             return error_json(StatusCode::INTERNAL_SERVER_ERROR, MSG_SIGNUP_FAILED);
         }
     }
+    // 저장된 행(createddate 포함)을 다시 읽어 돌려준다. 못 읽으면 저장한 값으로 응답한다 (basicproject_go 와 같다).
+    if let Ok(Some(saved)) = User::get(&pool, user.id).await {
+        user = saved;
+    }
     send_token(StatusCode::CREATED, &user)
 }
 
@@ -369,7 +372,8 @@ async fn me(State(pool): State<MySqlPool>, session: Option<Session>) -> Response
     };
     match User::get(&pool, s.id).await {
         Ok(Some(u)) => Json(UserResponse::from(&u)).into_response(),
-        Ok(None) => error_json(StatusCode::NOT_FOUND, MSG_USER_NOT_FOUND),
+        // 토큰은 유효하지만 회원이 지워졌다.
+        Ok(None) => error_json(StatusCode::UNAUTHORIZED, MSG_AUTH_REQUIRED),
         Err(e) => db_error(e),
     }
 }
@@ -456,10 +460,18 @@ mod tests {
                 "token": "t.o.k",
                 "tokenType": "Bearer",
                 "expiresInMs": 86_400_000,
-                "user": {"id": 42, "email": "a@b.c", "name": "n", "level": 1, "createdAt": "2026-01-01 09:00:00"}
+                "user": {"id": 42, "email": "a@b.c", "name": "n", "level": 1, "createddate": "2026-01-01 09:00:00"}
             })
         );
         assert!(!v.to_string().contains("secret"));
+        // user 는 생성된 User 응답과 같은 key 다 (extra 는 조인 / enum 표시용이라 빠진다)
+        let generated = serde_json::to_value(&user).unwrap();
+        let mut keys: Vec<&String> = generated.as_object().unwrap().keys().filter(|k| *k != "extra").collect();
+        keys.sort();
+        let mut ours: Vec<&String> = v["user"].as_object().unwrap().keys().collect();
+        ours.sort();
+        assert_eq!(keys, ours);
+        assert_eq!(v["user"]["createddate"], generated["createddate"]);
     }
 
     #[tokio::test]
